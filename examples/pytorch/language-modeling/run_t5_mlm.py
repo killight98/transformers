@@ -5,9 +5,10 @@ import math
 import os
 import sys
 import numpy as np
+import torch
 from dataclasses import dataclass, field
 from itertools import chain
-from typing import Optional
+from typing import Optional, Dict, List, Any, Union
 
 import datasets
 from datasets import load_dataset, load_metric
@@ -21,6 +22,7 @@ from transformers import (
     AutoTokenizer,
     DataCollatorForLanguageModeling,
     DataCollatorForSeq2Seq,
+    BatchEncoding,
     HfArgumentParser,
     T5Config,
     T5ForConditionalGeneration,
@@ -264,43 +266,39 @@ class DataCollatorForT5MLM:
     pad_token_id: int
     decoder_start_token_id: int
 
-    # TODO: align with Trainer
-    def __call__(self, examples: List[Dict[str, np.ndarray]]) -> Dict[str, np.ndarray]:
-
-        # convert list to dict and tensorize input
-        batch = BatchEncoding(
-            {k: np.array([examples[i][k] for i in range(len(examples))]) for k, v in examples[0].items()}
-        )
-
-        input_ids = batch["input_ids"]
-        batch_size, expandend_input_length = input_ids.shape
-
-        mask_indices = np.asarray([self.random_spans_noise_mask(expandend_input_length) for i in range(batch_size)])
-        labels_mask = ~mask_indices
-
-        input_ids_sentinel = self.create_sentinel_ids(mask_indices.astype(np.int8))
-        labels_sentinel = self.create_sentinel_ids(labels_mask.astype(np.int8))
-
-        batch["input_ids"] = self.filter_input_ids(input_ids, input_ids_sentinel)
-        batch["labels"] = self.filter_input_ids(input_ids, labels_sentinel)
-
-        if batch["input_ids"].shape[-1] != self.input_length:
-            raise ValueError(
-                f"`input_ids` are incorrectly preprocessed. `input_ids` length is {batch['input_ids'].shape[-1]}, but"
-                f" should be {self.target_length}."
-            )
-
-        if batch["labels"].shape[-1] != self.target_length:
-            raise ValueError(
-                f"`labels` are incorrectly preprocessed. `labels` length is {batch['labels'].shape[-1]}, but should be"
-                f" {self.target_length}."
-            )
-
-        # to check that tokens are correctly preprocessed, one can run `self.tokenizer.batch_decode(input_ids)` and `self.tokenizer.batch_decode(labels)` here...
-        batch["decoder_input_ids"] = shift_tokens_right(
-            batch["labels"], self.pad_token_id, self.decoder_start_token_id
-        )
-
+    def __call__(self, examples: List[Union[List[int], Any, Dict[str, Any]]]) -> Dict[str, np.ndarray]:
+        features = []
+        decoder_input_ids = []
+        # span noise one by one
+        for e in examples:
+            # check last token (eos)
+            inputs = e["input_ids"][:-1] if e["input_ids"][-1] == self.tokenizer.eos_token_id else e["input_ids"]
+            mask_indice = np.asarray([self.random_spans_noise_mask(len(inputs))])
+            label_mask = ~mask_indice
+            input_id_sentinel = self.create_sentinel_ids(mask_indice.astype(np.int8))
+            label_sentinel = self.create_sentinel_ids(label_mask.astype(np.int8))
+            input_id = self.filter_input_ids(np.asarray([inputs]), input_id_sentinel)
+            label = self.filter_input_ids(np.asarray([inputs]), label_sentinel)
+            features.append({
+                "input_ids": input_id[0],
+            })
+            # decoder_input = shift_tokens_right(label, self.pad_token_id, self.decoder_start_token_id)
+            decoder_input_ids.append(label[0])
+        batch = self.tokenizer.pad(features, return_tensors="pt")
+        max_decoder_inputs = 0
+        for d in decoder_input_ids:
+            if len(d) > max_decoder_inputs:
+                max_decoder_inputs = len(d)
+        padding_decoder_inputs = None
+        for d in decoder_input_ids:
+            target_d = d
+            if len(d) < max_decoder_inputs:
+                target_d = np.pad(d, (0, max_decoder_inputs - len(d)), 'constant')
+            if padding_decoder_inputs is None:
+                padding_decoder_inputs = target_d
+            else:
+                padding_decoder_inputs = np.stack((padding_decoder_inputs, target_d))
+        batch["labels"] = torch.LongTensor(padding_decoder_inputs)
         return batch
 
     def create_sentinel_ids(self, mask_indices):
@@ -518,6 +516,22 @@ def main():
                 use_auth_token=True if model_args.use_auth_token else None,
             )
 
+    tokenizer_kwargs = {
+        "cache_dir": model_args.cache_dir,
+        "use_fast": model_args.use_fast_tokenizer,
+        # "revision": model_args.model_revision,
+        "use_auth_token": True if model_args.use_auth_token else None,
+    }
+    if model_args.tokenizer_name:
+        tokenizer = AutoTokenizer.from_pretrained(model_args.tokenizer_name, **tokenizer_kwargs)
+    elif model_args.model_name_or_path:
+        tokenizer = AutoTokenizer.from_pretrained(model_args.model_name_or_path, **tokenizer_kwargs)
+    else:
+        raise ValueError(
+            "You are instantiating a new tokenizer from scratch. This is not supported by this script."
+            "You can do it from another script, save it, and load it from here, using --tokenizer_name."
+        )
+
     # See more about loading any type of standard or custom dataset (from files, python dict, pandas DataFrame, etc) at
     # https://huggingface.co/docs/datasets/loading_datasets.html.
 
@@ -543,38 +557,11 @@ def main():
             config.update_from_string(model_args.config_overrides)
             logger.info(f"New config: {config}")
 
-    tokenizer_kwargs = {
-        "cache_dir": model_args.cache_dir,
-        "use_fast": model_args.use_fast_tokenizer,
-        "revision": model_args.model_revision,
-        "use_auth_token": True if model_args.use_auth_token else None,
-    }
-    if model_args.tokenizer_name:
-        tokenizer = AutoTokenizer.from_pretrained(model_args.tokenizer_name, **tokenizer_kwargs)
-    elif model_args.model_name_or_path:
-        tokenizer = AutoTokenizer.from_pretrained(model_args.model_name_or_path, **tokenizer_kwargs)
-    else:
-        raise ValueError(
-            "You are instantiating a new tokenizer from scratch. This is not supported by this script."
-            "You can do it from another script, save it, and load it from here, using --tokenizer_name."
-        )
-
-    max_seq_length = min(data_args.max_seq_length, tokenizer.model_max_length)
-
-    # T5-like span masked language modeling will fuse consecutively masked tokens to a single sentinel token.
-    # To ensure that the input length is `max_seq_length`, we need to increase the maximum length
-    # according to `mlm_probability` and `mean_noise_span_length`. We can also define the label length accordingly.
-    expanded_inputs_length, targets_length = compute_input_and_target_lengths(
-        inputs_length=max_seq_length,
-        noise_density=data_args.mlm_probability,
-        mean_noise_span_length=data_args.mean_noise_span_length,
-    )
-
     if model_args.model_name_or_path:
         # TODO: check args
         model = T5ForConditionalGeneration.from_pretrained(
             model_args.model_name_or_path,
-            from_tf=bool(".ckpt" in model_args.model_name_or_path),
+            # from_tf=bool(".ckpt" in model_args.model_name_or_path),
             config=config,
             cache_dir=model_args.cache_dir,
             revision=model_args.model_revision,
@@ -594,21 +581,16 @@ def main():
         column_names = raw_datasets["validation"].column_names
     text_column_name = "text" if "text" in column_names else column_names[0]
 
-    if data_args.max_seq_length is None:
-        max_seq_length = tokenizer.model_max_length
-        if max_seq_length > 1024:
-            logger.warning(
-                f"The tokenizer picked seems to have a very large `model_max_length` ({tokenizer.model_max_length}). "
-                "Picking 1024 instead. You can change that default value by passing --max_seq_length xxx."
-            )
-            max_seq_length = 1024
-    else:
-        if data_args.max_seq_length > tokenizer.model_max_length:
-            logger.warning(
-                f"The max_seq_length passed ({data_args.max_seq_length}) is larger than the maximum length for the"
-                f"model ({tokenizer.model_max_length}). Using max_seq_length={tokenizer.model_max_length}."
-            )
-        max_seq_length = min(data_args.max_seq_length, tokenizer.model_max_length)
+    max_seq_length = min(data_args.max_seq_length,
+                         tokenizer.model_max_length) if data_args.max_seq_length else tokenizer.model_max_length
+    # T5-like span masked language modeling will fuse consecutively masked tokens to a single sentinel token.
+    # To ensure that the input length is `max_seq_length`, we need to increase the maximum length
+    # according to `mlm_probability` and `mean_noise_span_length`. We can also define the label length accordingly.
+    expanded_inputs_length, targets_length = compute_input_and_target_lengths(
+        inputs_length=max_seq_length,
+        noise_density=data_args.mlm_probability,
+        mean_noise_span_length=data_args.mean_noise_span_length,
+    )
 
     # TODO: check
     if data_args.line_by_line:
@@ -624,10 +606,10 @@ def main():
                 examples[text_column_name],
                 padding=padding,
                 truncation=True,
-                max_length=max_seq_length,
+                max_length=expanded_inputs_length,
                 # We use this option because DataCollatorForLanguageModeling (see below) is more efficient when it
                 # receives the `special_tokens_mask`.
-                return_special_tokens_mask=True,
+                # return_special_tokens_mask=True,
             )
 
         with training_args.main_process_first(desc="dataset map tokenization"):
@@ -644,7 +626,7 @@ def main():
         # We use `return_special_tokens_mask=True` because DataCollatorForLanguageModeling (see below) is more
         # efficient when it receives the `special_tokens_mask`.
         def tokenize_function(examples):
-            return tokenizer(examples[text_column_name], return_special_tokens_mask=True)
+            return tokenizer(examples[text_column_name])
 
         with training_args.main_process_first(desc="dataset map tokenization"):
             tokenized_datasets = raw_datasets.map(
@@ -664,11 +646,11 @@ def main():
             total_length = len(concatenated_examples[list(examples.keys())[0]])
             # We drop the small remainder, we could add padding if the model supported it instead of this drop, you can
             # customize this part to your needs.
-            if total_length >= max_seq_length:
-                total_length = (total_length // max_seq_length) * max_seq_length
+            if total_length >= expanded_inputs_length:
+                total_length = (total_length // expanded_inputs_length) * expanded_inputs_length
             # Split by chunks of max_len.
             result = {
-                k: [t[i: i + max_seq_length] for i in range(0, total_length, max_seq_length)]
+                k: [t[i: i + expanded_inputs_length] for i in range(0, total_length, expanded_inputs_length)]
                 for k, t in concatenated_examples.items()
             }
             return result
@@ -686,7 +668,7 @@ def main():
                 batched=True,
                 num_proc=data_args.preprocessing_num_workers,
                 load_from_cache_file=not data_args.overwrite_cache,
-                desc=f"Grouping texts in chunks of {max_seq_length}",
+                desc=f"Grouping texts in chunks of {expanded_inputs_length}",
             )
 
     if training_args.do_train:
