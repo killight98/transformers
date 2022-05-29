@@ -291,13 +291,13 @@ class DataCollatorForT5MLM:
                 max_decoder_inputs = len(d)
         padding_decoder_inputs = None
         for d in decoder_input_ids:
-            target_d = d
+            target_d = d.reshape(1, -1)
             if len(d) < max_decoder_inputs:
-                target_d = np.pad(d, (0, max_decoder_inputs - len(d)), 'constant')
+                target_d = np.pad(target_d, ((0, 0), (0, max_decoder_inputs - len(d))), 'constant')
             if padding_decoder_inputs is None:
                 padding_decoder_inputs = target_d
             else:
-                padding_decoder_inputs = np.stack((padding_decoder_inputs, target_d))
+                padding_decoder_inputs = np.concatenate([padding_decoder_inputs, target_d])
         batch["labels"] = torch.LongTensor(padding_decoder_inputs)
         return batch
 
