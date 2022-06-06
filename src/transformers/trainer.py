@@ -2274,7 +2274,7 @@ class Trainer:
             labels = inputs.pop("labels")
         else:
             labels = None
-        outputs = model(**inputs)
+        outputs = model(*inputs)
         # Save past state if it exists
         # TODO: this needs to be fixed and made cleaner later.
         if self.args.past_index >= 0:
@@ -2323,7 +2323,8 @@ class Trainer:
             # Calling the state_dict needs to be done on the wrapped model and on all processes.
             state_dict = self.model_wrapped.state_dict()
             if self.args.should_save:
-                self._save(output_dir, state_dict=state_dict)
+                self.model.encoder.save(output_dir)
+                # self._save(output_dir, state_dict=state_dict)
         elif (
             ShardedDDPOption.ZERO_DP_2 in self.args.sharded_ddp
             or ShardedDDPOption.ZERO_DP_3 in self.args.sharded_ddp
@@ -2332,12 +2333,15 @@ class Trainer:
             state_dict = self.model.state_dict()
 
             if self.args.should_save:
-                self._save(output_dir, state_dict=state_dict)
+                # self._save(output_dir, state_dict=state_dict)
+                self.model.encoder.save(output_dir)
+
         elif self.deepspeed:
 
             # this takes care of everything as long as we aren't under zero3
             if self.args.should_save:
-                self._save(output_dir)
+                # self._save(output_dir)
+                self.model.encoder.save(output_dir)
 
             if is_deepspeed_zero3_enabled():
                 # It's too complicated to try to override different places where the weights dump gets
@@ -2362,7 +2366,8 @@ class Trainer:
                     self.deepspeed.save_checkpoint(output_dir)
 
         elif self.args.should_save:
-            self._save(output_dir)
+            # self._save(output_dir)
+            self.model.encoder.save(output_dir)
 
         # Push to the Hub when `save_model` is called by the user.
         if self.args.push_to_hub and not _internal_call:
@@ -2946,7 +2951,7 @@ class Trainer:
                 else:
                     loss = None
                     with self.compute_loss_context_manager():
-                        outputs = model(**inputs)
+                        outputs = model(*inputs)
                     if isinstance(outputs, dict):
                         logits = tuple(v for k, v in outputs.items() if k not in ignore_keys)
                     else:
