@@ -74,7 +74,7 @@ class ModelArguments:
 
     def __post_init__(self):
         assert self.pooling_mode in ['mean', 'max', 'cls'], self.pooling_mode.metadata
-        assert self.pooling_mode is not None, "Please provide model_name_or_path unless training from scratch"
+        assert self.model_name_or_path is not None, "Please provide model_name_or_path unless training from scratch"
 
 
 def main():
