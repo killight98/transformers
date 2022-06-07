@@ -114,12 +114,6 @@ def main():
     train_sentences = read_corpus_for_pretrain(data_args.train_file)
     train_dataset = DenoisingAutoEncoderDataset(train_sentences)
 
-    tokenizer_kwargs = {
-        "cache_dir": model_args.cache_dir,
-        "use_fast": model_args.use_fast_tokenizer,
-    }
-
-    tokenizer = AutoTokenizer.from_pretrained(model_args.model_name_or_path, **tokenizer_kwargs)
     word_embedding_model = models.Transformer(model_args.model_name_or_path)
     pooling_model = models.Pooling(word_embedding_model.get_word_embedding_dimension(), model_args.pooling_mode)
     model = SentenceTransformer(modules=[word_embedding_model, pooling_model])
@@ -132,7 +126,7 @@ def main():
         model=tsade,
         args=training_args,
         train_dataset=train_dataset if training_args.do_train else None,
-        tokenizer=tokenizer,
+        tokenizer=word_embedding_model.tokenizer,
         data_collator=collate_fn
     )
 
