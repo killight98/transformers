@@ -113,6 +113,7 @@ def main():
     train_sentences = read_corpus_for_pretrain(data_args.train_file)
     train_dataset = DenoisingAutoEncoderDataset(train_sentences)
 
+    # Prepare the sentencetransformer modules and tsdae models
     word_embedding_model = models.Transformer(model_args.model_name_or_path)
     pooling_model = models.Pooling(word_embedding_model.get_word_embedding_dimension(), model_args.pooling_mode)
     model = SentenceTransformer(modules=[word_embedding_model, pooling_model])
