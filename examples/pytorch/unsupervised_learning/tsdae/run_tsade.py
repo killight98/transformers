@@ -21,7 +21,7 @@ from model import TSDAE
 
 logger = logging.getLogger(__name__)
 
-RESULT_DIR = '/tsdae-'+ datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+RESULT_DIR = '-tsdae'
 
 @dataclass
 class DataTrainingArguments:
@@ -136,6 +136,12 @@ def main():
             checkpoint = training_args.resume_from_checkpoint
         elif last_checkpoint is not None:
             checkpoint = last_checkpoint
+
+        if checkpoint is not None:
+            logger.info(
+                f"Checkpoint detected, resuming training at {checkpoint}."
+            )
+
         train_result = trainer.train(resume_from_checkpoint=checkpoint)
         trainer.save_model()  # Saves the tokenizer too for easy upload
         trainer.save_state()
