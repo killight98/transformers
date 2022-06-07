@@ -6,7 +6,6 @@ from typing import Optional
 from datetime import datetime
 
 from transformers import (
-    AutoTokenizer,
     HfArgumentParser,
     Trainer,
     TrainingArguments,
