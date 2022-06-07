@@ -21,7 +21,6 @@ from model import TSDAE
 
 logger = logging.getLogger(__name__)
 
-RESULT_DIR = '-tsdae'
 
 @dataclass
 class DataTrainingArguments:
@@ -79,7 +78,6 @@ class ModelArguments:
 def main():
     parser = HfArgumentParser((ModelArguments, DataTrainingArguments, TrainingArguments))
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
-    training_args.output_dir += RESULT_DIR
     # Log on each process the small summary:
     logger.warning(
         f"Process rank: {training_args.local_rank}, device: {training_args.device}, n_gpu: {training_args.n_gpu}"
