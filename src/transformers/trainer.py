@@ -1706,8 +1706,7 @@ class Trainer:
         if model is None:
             model = self.model
         strict_load = is_sagemaker_mp_enabled()
-
-        if not os.path.isfile(os.path.join(resume_from_checkpoint, WEIGHTS_NAME)) and not os.path.isfile(
+        if not os.path.isfile(os.path.join(resume_from_checkpoint, "whole_model.bin")) and not os.path.isfile(
             os.path.join(resume_from_checkpoint, WEIGHTS_INDEX_NAME)
         ):
             raise ValueError(f"Can't find a valid checkpoint at {resume_from_checkpoint}")
