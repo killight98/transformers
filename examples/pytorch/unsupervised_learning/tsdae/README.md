@@ -8,5 +8,5 @@ Need to install sentence-transformers:
 # To load the trained model into a sentencetransformer for later downstream tasks:
 ```
 from sentence_transformers import SentenceTransformer
-SentenceTransformer("/home/kangwenj/aic/fork/transformers/examples/pytorch/unsupervised_learning/tsdae/output/tsdae-2022-06-06_19-11-48/checkpoint-500")
+sbert = SentenceTransformer("/home/kangwenj/aic/fork/transformers/examples/pytorch/unsupervised_learning/tsdae/output/tsdae-2022-06-06_19-11-48/checkpoint-500")
 ```
