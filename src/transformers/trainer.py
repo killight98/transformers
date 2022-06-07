@@ -1727,9 +1727,11 @@ class Trainer:
         if self.args.deepspeed:
             # will be resumed in deepspeed_init
             pass
-        elif os.path.isfile(os.path.join(resume_from_checkpoint, WEIGHTS_NAME)):
+        # elif os.path.isfile(os.path.join(resume_from_checkpoint, WEIGHTS_NAME)):
+        elif os.path.isfile(os.path.join(resume_from_checkpoint, "whole_model.bin")):
             # We load the model state dict on the CPU to avoid an OOM error.
-            state_dict = torch.load(os.path.join(resume_from_checkpoint, WEIGHTS_NAME), map_location="cpu")
+            # state_dict = torch.load(os.path.join(resume_from_checkpoint, WEIGHTS_NAME), map_location="cpu")
+            state_dict = torch.load(os.path.join(resume_from_checkpoint, "whole_model.bin"), map_location="cpu")
             # If the model is on the GPU, it still works!
             load_result = model.load_state_dict(state_dict, strict=strict_load)
             if not strict_load:
@@ -2324,6 +2326,7 @@ class Trainer:
             state_dict = self.model_wrapped.state_dict()
             if self.args.should_save:
                 self.model.encoder.save(output_dir)
+                torch.save(self.model.state_dict(), os.path.join(output_dir, "whole_model.bin"))
                 # self._save(output_dir, state_dict=state_dict)
         elif (
             ShardedDDPOption.ZERO_DP_2 in self.args.sharded_ddp
@@ -2335,6 +2338,7 @@ class Trainer:
             if self.args.should_save:
                 # self._save(output_dir, state_dict=state_dict)
                 self.model.encoder.save(output_dir)
+                torch.save(self.model.state_dict(), os.path.join(output_dir, "whole_model.bin"))
 
         elif self.deepspeed:
 
@@ -2342,6 +2346,7 @@ class Trainer:
             if self.args.should_save:
                 # self._save(output_dir)
                 self.model.encoder.save(output_dir)
+                torch.save(self.model.state_dict(), os.path.join(output_dir, "whole_model.bin"))
 
             if is_deepspeed_zero3_enabled():
                 # It's too complicated to try to override different places where the weights dump gets
@@ -2368,6 +2373,7 @@ class Trainer:
         elif self.args.should_save:
             # self._save(output_dir)
             self.model.encoder.save(output_dir)
+            torch.save(self.model.state_dict(), os.path.join(output_dir, "whole_model.bin"))
 
         # Push to the Hub when `save_model` is called by the user.
         if self.args.push_to_hub and not _internal_call:
