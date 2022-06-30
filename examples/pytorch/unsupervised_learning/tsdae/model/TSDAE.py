@@ -36,6 +36,7 @@ class TSDAE(nn.Module):
         super(TSDAE, self).__init__()
         self.encoder = model  # This will be the final model used during the inference time.
         self.tokenizer_encoder = model.tokenizer
+        self.config = model[0].auto_model.config
 
         encoder_name_or_path = model[0].auto_model.config._name_or_path
         if decoder_name_or_path is None:
