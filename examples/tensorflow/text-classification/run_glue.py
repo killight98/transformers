@@ -22,6 +22,7 @@ import os
 import sys
 from dataclasses import dataclass, field
 from typing import Optional
+from datetime import datetime
 
 import evaluate
 import numpy as np
@@ -487,11 +488,17 @@ def main():
                 validation_data = tf_data["validation"]
             else:
                 validation_data = None
+            logs = "tracing/" + datetime.now().strftime("%Y%m%d-%H%M%S")
+            # profile batch 2 to 4
+            tboard_callback = tf.keras.callbacks.TensorBoard(log_dir=logs,
+                                                             histogram_freq=1,
+                                                             profile_batch=(2, 4))
+
             model.fit(
                 tf_data["train"],
                 validation_data=validation_data,
                 epochs=int(training_args.num_train_epochs),
-                callbacks=callbacks,
+                callbacks=[*callbacks, tboard_callback],
             )
         # endregion
 
