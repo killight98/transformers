@@ -1791,8 +1791,19 @@ class Trainer:
                     _ = list(sampler)
 
         total_batched_samples = 0
-        profiler_config = ProfilerConfig(active=self.args.profile_step) if self.args.profile_step is not None else None
-        with ProfilerWrapper("cuda", profiler_config) as profiler:
+
+        def _trace_handler(prof):
+            # print(prof.key_averages().table(
+            #    sort_by="self_cuda_time_total", row_limit=20))
+            # prof.export_stacks(f"./stacks/stacks_{prof.step_num}")
+            prof.export_chrome_trace(f"./tracing/pytorch_{os.getpid()}_{prof.step_num}.json")
+
+        with torch.profiler.profile(
+                # disable cuda (torch.profiler.ProfilerActivity.CUDA) and profile_memory
+                # active step is 4. TODO: config active num
+                activities=[torch.profiler.ProfilerActivity.CPU],
+                schedule=torch.profiler.schedule(wait=0, warmup=0, active=8),
+                on_trace_ready=_trace_handler, ) as profiler:
             for epoch in range(epochs_trained, num_train_epochs):
                 epoch_iterator = train_dataloader
                 if hasattr(epoch_iterator, "set_epoch"):
