@@ -1796,11 +1796,11 @@ class Trainer:
             # print(prof.key_averages().table(
             #    sort_by="self_cuda_time_total", row_limit=20))
             # prof.export_stacks(f"./stacks/stacks_{prof.step_num}")
-            prof.export_chrome_trace(f"./tracing/pytorch_{os.getpid()}_{prof.step_num}.json")
+            prof.export_chrome_trace(f"./torchshim_{os.uname()[1]}_{os.getpid()}_{prof.step_num}.json")
 
         with torch.profiler.profile(
                 # disable cuda (torch.profiler.ProfilerActivity.CUDA) and profile_memory
-                # active step is 4. TODO: config active num
+                # active step is 8. TODO: config active num
                 activities=[torch.profiler.ProfilerActivity.CPU],
                 schedule=torch.profiler.schedule(wait=0, warmup=0, active=8),
                 on_trace_ready=_trace_handler, ) as profiler:
