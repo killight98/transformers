@@ -157,6 +157,7 @@ from .utils import (
     strtobool,
 )
 from .utils.generic import ContextManagers
+from .utils.profiler import ProfilerConfig, ProfilerWrapper
 
 
 _is_native_cpu_amp_available = is_torch_greater_or_equal_than_1_10
@@ -1872,18 +1873,7 @@ class Trainer:
 
         total_batched_samples = 0
 
-        def _trace_handler(prof):
-            # print(prof.key_averages().table(
-            #    sort_by="self_cuda_time_total", row_limit=20))
-            # prof.export_stacks(f"./stacks/stacks_{prof.step_num}")
-            prof.export_chrome_trace(f"./torchshim_{os.uname()[1]}_{os.getpid()}_{prof.step_num}.json")
-
-        with torch.profiler.profile(
-                # disable cuda (torch.profiler.ProfilerActivity.CUDA) and profile_memory
-                # active step is 8. TODO: config active num
-                activities=[torch.profiler.ProfilerActivity.CPU],
-                schedule=torch.profiler.schedule(wait=0, warmup=0, active=8),
-                on_trace_ready=_trace_handler, ) as profiler:
+        with ProfilerWrapper("cuda", ProfilerConfig()) as profiler:
             for epoch in range(epochs_trained, num_train_epochs):
                 if isinstance(train_dataloader, DataLoader) and isinstance(train_dataloader.sampler, DistributedSampler):
                     train_dataloader.sampler.set_epoch(epoch)

@@ -47,6 +47,7 @@ from transformers import (
 )
 from transformers.utils import check_min_version, get_full_repo_name, send_example_telemetry
 from transformers.utils.versions import require_version
+from transformers.utils.profiler import ProfilerConfig, ProfilerWrapper
 # for xpu
 import intel_extension_for_pytorch as ipex
 import oneccl_bindings_for_pytorch
@@ -548,16 +549,7 @@ def main():
             starting_epoch = resume_step // len(train_dataloader)
             resume_step -= starting_epoch * len(train_dataloader)
 
-    def _trace_handler(prof):
-        #print(prof.key_averages().table(
-        #    sort_by="self_cpu_time_total", row_limit=20))
-        # prof.export_stacks(f"./stacks/stacks_{prof.step_num}")
-        prof.export_chrome_trace(f"./torchshim_{os.uname()[1]}_{os.getpid()}_{prof.step_num}.json")
-
-    with torch.profiler.profile(
-            activities=[torch.profiler.ProfilerActivity.CPU],
-            schedule=torch.profiler.schedule(wait=0, warmup=0, active=8),
-            on_trace_ready=_trace_handler, ) as profiler:
+    with ProfilerWrapper("xpu", ProfilerConfig()) as profiler:
         for epoch in range(starting_epoch, args.num_train_epochs):
             model.train()
             if args.with_tracking:
