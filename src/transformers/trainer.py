@@ -2022,7 +2022,9 @@ class Trainer:
                         self._maybe_log_save_evaluate(tr_loss, model, trial, epoch, ignore_keys_for_eval)
                     else:
                         self.control = self.callback_handler.on_substep_end(args, self.state, self.control)
-
+                    if step > 8:
+                        # stop training for collection
+                        exit()
                     if self.control.should_epoch_stop or self.control.should_training_stop:
                         break
                 if step < 0:
