@@ -550,6 +550,7 @@ def main():
             model,
             device_ids=[local_rank],
             output_device=local_rank,
+            broadcast_buffers=False,
             #find_unused_parameters=True
         )
     # Prepare everything with our `accelerator`.
