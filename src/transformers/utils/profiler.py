@@ -32,6 +32,7 @@ class ProfilerWrapper:
             _activities.append(torch.profiler.ProfilerActivity.XPU)
         self._profiler = torch.profiler.profile(activities=_activities,
                                                 schedule=self._config.get_schedule(),
+                                                with_stack=True,
                                                 on_trace_ready=self._trace_handler, **_extra_args) if config else None
 
     def __enter__(self):
