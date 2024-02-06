@@ -33,13 +33,13 @@ from pathlib import Path
 
 import datasets
 import torch
-from accelerate import Accelerator, DistributedType
-from accelerate.logging import get_logger
-from accelerate.utils import set_seed
+
 from datasets import load_dataset
 from huggingface_hub import Repository, create_repo
 from torch.utils.data import DataLoader
+from torch import nn
 from tqdm.auto import tqdm
+from typing import Tuple
 
 import transformers
 from transformers import (
@@ -54,12 +54,16 @@ from transformers import (
 )
 from transformers.utils import check_min_version, get_full_repo_name, send_example_telemetry
 from transformers.utils.versions import require_version
-
+from transformers.utils.profiler import ProfilerConfig, ProfilerWrapper
+# For xpu
+import intel_extension_for_pytorch as ipex
+import oneccl_bindings_for_pytorch
 
 # Will error if the minimal version of Transformers is not installed. Remove at your own risks.
-check_min_version("4.30.0.dev0")
+# check_min_version("4.30.0.dev0")
 
-logger = get_logger(__name__)
+# logger = get_logger(__name__)
+logger = logging.getLogger(__name__)
 require_version("datasets>=1.8.0", "To fix: pip install -r examples/pytorch/language-modeling/requirements.txt")
 MODEL_CONFIG_CLASSES = list(MODEL_MAPPING.keys())
 MODEL_TYPES = tuple(conf.model_type for conf in MODEL_CONFIG_CLASSES)
@@ -255,6 +259,33 @@ def parse_args():
 
     return args
 
+def xpu_device_count():
+    return torch.xpu.device_count()
+    # return torch.xpu.xpu_device_count()
+
+def check_xpu() -> Tuple[bool, str, int, int]:
+    # return: is_ddp, device, rank, world_size
+    device_count = xpu_device_count()
+    if "PMI_SIZE" in os.environ:
+        rank = int(os.environ["PMI_RANK"])
+        world_size = int(os.environ["PMI_SIZE"])
+        assert rank < device_count, f"Not enough device for local rank {rank}"
+        # re-config env
+        os.environ['RANK'] = str(rank)
+        os.environ['WORLD_SIZE'] = str(world_size)
+        os.environ['MASTER_ADDR'] = '127.0.0.1'
+        os.environ['MASTER_PORT'] = '29500'
+        torch.distributed.init_process_group(backend="ccl")
+        return True, f"xpu:{rank}", rank, world_size
+    assert device_count >= 1, "Cannot find xpu"
+    return False, f"xpu:0", -1, -1
+
+def pre_batch(batch, device):
+    for k,v in batch.items():
+        if isinstance(v, dict):
+            pre_batch(v, device)
+        elif isinstance(v, torch.Tensor):
+            batch[k] = v.to(device)
 
 def main():
     args = parse_args()
@@ -263,16 +294,7 @@ def main():
     # information sent is the one passed as arguments along with your Python/PyTorch versions.
     send_example_telemetry("run_mlm_no_trainer", args)
 
-    # Initialize the accelerator. We will let the accelerator handle device placement for us in this example.
-    # If we're using tracking, we also need to initialize it here and it will by default pick up all supported trackers
-    # in the environment
-    accelerator_log_kwargs = {}
-
-    if args.with_tracking:
-        accelerator_log_kwargs["log_with"] = args.report_to
-        accelerator_log_kwargs["logging_dir"] = args.output_dir
-
-    accelerator = Accelerator(gradient_accumulation_steps=args.gradient_accumulation_steps, **accelerator_log_kwargs)
+    use_ddp, device, local_rank, world_size = check_xpu()
 
     # Make one log on every process with the configuration for debugging.
     logging.basicConfig(
@@ -280,36 +302,10 @@ def main():
         datefmt="%m/%d/%Y %H:%M:%S",
         level=logging.INFO,
     )
-    logger.info(accelerator.state, main_process_only=False)
-    if accelerator.is_local_main_process:
-        datasets.utils.logging.set_verbosity_warning()
-        transformers.utils.logging.set_verbosity_info()
-    else:
-        datasets.utils.logging.set_verbosity_error()
-        transformers.utils.logging.set_verbosity_error()
 
     # If passed along, set the training seed now.
     if args.seed is not None:
         set_seed(args.seed)
-
-    # Handle the repository creation
-    if accelerator.is_main_process:
-        if args.push_to_hub:
-            if args.hub_model_id is None:
-                repo_name = get_full_repo_name(Path(args.output_dir).name, token=args.hub_token)
-            else:
-                repo_name = args.hub_model_id
-            create_repo(repo_name, exist_ok=True, token=args.hub_token)
-            repo = Repository(args.output_dir, clone_from=repo_name, token=args.hub_token)
-
-            with open(os.path.join(args.output_dir, ".gitignore"), "w+") as gitignore:
-                if "step_*" not in gitignore:
-                    gitignore.write("step_*\n")
-                if "epoch_*" not in gitignore:
-                    gitignore.write("epoch_*\n")
-        elif args.output_dir is not None:
-            os.makedirs(args.output_dir, exist_ok=True)
-    accelerator.wait_for_everyone()
 
     # Get the datasets: you can either provide your own CSV/JSON/TXT training and evaluation files (see below)
     # or just provide the name of one of the public datasets available on the hub at https://huggingface.co/datasets/
@@ -440,15 +436,14 @@ def main():
                 return_special_tokens_mask=True,
             )
 
-        with accelerator.main_process_first():
-            tokenized_datasets = raw_datasets.map(
+        tokenized_datasets = raw_datasets.map(
                 tokenize_function,
                 batched=True,
                 num_proc=args.preprocessing_num_workers,
                 remove_columns=[text_column_name],
                 load_from_cache_file=not args.overwrite_cache,
                 desc="Running tokenizer on dataset line_by_line",
-            )
+        )
     else:
         # Otherwise, we tokenize every text, then concatenate them together before splitting them in smaller parts.
         # We use `return_special_tokens_mask=True` because DataCollatorForLanguageModeling (see below) is more
@@ -456,15 +451,14 @@ def main():
         def tokenize_function(examples):
             return tokenizer(examples[text_column_name], return_special_tokens_mask=True)
 
-        with accelerator.main_process_first():
-            tokenized_datasets = raw_datasets.map(
+        tokenized_datasets = raw_datasets.map(
                 tokenize_function,
                 batched=True,
                 num_proc=args.preprocessing_num_workers,
                 remove_columns=column_names,
                 load_from_cache_file=not args.overwrite_cache,
                 desc="Running tokenizer on every text in dataset",
-            )
+        )
 
         # Main data processing function that will concatenate all texts from our dataset and generate chunks of
         # max_seq_length.
@@ -489,14 +483,13 @@ def main():
         # To speed up this part, we use multiprocessing. See the documentation of the map method for more information:
         # https://huggingface.co/docs/datasets/package_reference/main_classes.html#datasets.Dataset.map
 
-        with accelerator.main_process_first():
-            tokenized_datasets = tokenized_datasets.map(
+        tokenized_datasets = tokenized_datasets.map(
                 group_texts,
                 batched=True,
                 num_proc=args.preprocessing_num_workers,
                 load_from_cache_file=not args.overwrite_cache,
                 desc=f"Grouping texts in chunks of {max_seq_length}",
-            )
+        )
 
     train_dataset = tokenized_datasets["train"]
     eval_dataset = tokenized_datasets["validation"]
@@ -549,14 +542,17 @@ def main():
         num_training_steps=args.max_train_steps * args.gradient_accumulation_steps,
     )
 
-    # Prepare everything with our `accelerator`.
-    model, optimizer, train_dataloader, eval_dataloader, lr_scheduler = accelerator.prepare(
-        model, optimizer, train_dataloader, eval_dataloader, lr_scheduler
-    )
-
-    # On TPU, the tie weights in our model have been disconnected, so we need to restore the ties.
-    if accelerator.distributed_type == DistributedType.TPU:
-        model.tie_weights()
+    model.to(device)
+    model.train()
+    model, optimizer = ipex.optimize(model, optimizer=optimizer, inplace=True)
+    if use_ddp and torch.distributed.get_world_size() > 1:
+        model = nn.parallel.DistributedDataParallel(
+            model,
+            device_ids=[local_rank],
+            output_device=local_rank,
+            broadcast_buffers=False,
+            # find_unused_parameters=True
+        )
 
     # We need to recalculate our total training steps as the size of the training dataloader may have changed.
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
@@ -579,7 +575,7 @@ def main():
         accelerator.init_trackers("mlm_no_trainer", experiment_config)
 
     # Train!
-    total_batch_size = args.per_device_train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
+    total_batch_size = args.per_device_train_batch_size * world_size * args.gradient_accumulation_steps
 
     logger.info("***** Running training *****")
     logger.info(f"  Num examples = {len(train_dataset)}")
@@ -589,15 +585,13 @@ def main():
     logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
     logger.info(f"  Total optimization steps = {args.max_train_steps}")
     # Only show the progress bar once on each machine.
-    progress_bar = tqdm(range(args.max_train_steps), disable=not accelerator.is_local_main_process)
+    progress_bar = tqdm(range(args.max_train_steps), disable=local_rank > 0)
     completed_steps = 0
     starting_epoch = 0
 
     # Potentially load in the weights and states from a previous save
     if args.resume_from_checkpoint:
         if args.resume_from_checkpoint is not None or args.resume_from_checkpoint != "":
-            accelerator.print(f"Resumed from checkpoint: {args.resume_from_checkpoint}")
-            accelerator.load_state(args.resume_from_checkpoint)
             path = os.path.basename(args.resume_from_checkpoint)
         else:
             # Get the most recent checkpoint
@@ -621,89 +615,89 @@ def main():
     # update the progress_bar if load from checkpoint
     progress_bar.update(completed_steps)
 
-    for epoch in range(starting_epoch, args.num_train_epochs):
-        model.train()
-        if args.with_tracking:
-            total_loss = 0
-        if args.resume_from_checkpoint and epoch == starting_epoch and resume_step is not None:
-            # We skip the first `n` batches in the dataloader when resuming from a checkpoint
-            active_dataloader = accelerator.skip_first_batches(train_dataloader, resume_step)
-        else:
-            active_dataloader = train_dataloader
-        for step, batch in enumerate(active_dataloader):
-            with accelerator.accumulate(model):
+    with ProfilerWrapper("xpu", ProfilerConfig()) as profiler:
+        for epoch in range(starting_epoch, args.num_train_epochs):
+            model.train()
+            if args.with_tracking:
+                total_loss = 0
+            if args.resume_from_checkpoint and epoch == starting_epoch and resume_step is not None:
+                # We skip the first `n` batches in the dataloader when resuming from a checkpoint
+                active_dataloader = accelerator.skip_first_batches(train_dataloader, resume_step)
+            else:
+                active_dataloader = train_dataloader
+            for step, batch in enumerate(active_dataloader):
+                pre_batch(batch, device)
                 outputs = model(**batch)
                 loss = outputs.loss
                 # We keep track of the loss at each epoch
                 if args.with_tracking:
                     total_loss += loss.detach().float()
-                accelerator.backward(loss)
+                loss.backward()
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad()
+                profiler.step()
 
-            # Checks if the accelerator has performed an optimization step behind the scenes
-            if accelerator.sync_gradients:
-                progress_bar.update(1)
-                completed_steps += 1
+                if isinstance(checkpointing_steps, int):
+                    if completed_steps % checkpointing_steps == 0:
+                        output_dir = f"step_{completed_steps }"
+                        if args.output_dir is not None:
+                            output_dir = os.path.join(args.output_dir, output_dir)
+                        accelerator.save_state(output_dir)
 
-            if isinstance(checkpointing_steps, int):
-                if completed_steps % checkpointing_steps == 0:
-                    output_dir = f"step_{completed_steps }"
-                    if args.output_dir is not None:
-                        output_dir = os.path.join(args.output_dir, output_dir)
-                    accelerator.save_state(output_dir)
+                if completed_steps >= args.max_train_steps:
+                    break
 
-            if completed_steps >= args.max_train_steps:
-                break
+                if step > 8:
+                    exit()
 
-        model.eval()
-        losses = []
-        for step, batch in enumerate(eval_dataloader):
-            with torch.no_grad():
-                outputs = model(**batch)
+            model.eval()
+            losses = []
+            for step, batch in enumerate(eval_dataloader):
+                with torch.no_grad():
+                    outputs = model(**batch)
 
-            loss = outputs.loss
-            losses.append(accelerator.gather_for_metrics(loss.repeat(args.per_device_eval_batch_size)))
+                loss = outputs.loss
+                losses.append(accelerator.gather_for_metrics(loss.repeat(args.per_device_eval_batch_size)))
 
-        losses = torch.cat(losses)
-        try:
-            eval_loss = torch.mean(losses)
-            perplexity = math.exp(eval_loss)
-        except OverflowError:
-            perplexity = float("inf")
+            losses = torch.cat(losses)
+            try:
+                eval_loss = torch.mean(losses)
+                perplexity = math.exp(eval_loss)
+            except OverflowError:
+                perplexity = float("inf")
 
-        logger.info(f"epoch {epoch}: perplexity: {perplexity}")
+            logger.info(f"epoch {epoch}: perplexity: {perplexity}")
 
-        if args.with_tracking:
-            accelerator.log(
-                {
-                    "perplexity": perplexity,
-                    "eval_loss": eval_loss,
-                    "train_loss": total_loss.item() / len(train_dataloader),
-                    "epoch": epoch,
-                    "step": completed_steps,
-                },
-                step=completed_steps,
-            )
-
-        if args.push_to_hub and epoch < args.num_train_epochs - 1:
-            accelerator.wait_for_everyone()
-            unwrapped_model = accelerator.unwrap_model(model)
-            unwrapped_model.save_pretrained(
-                args.output_dir, is_main_process=accelerator.is_main_process, save_function=accelerator.save
-            )
-            if accelerator.is_main_process:
-                tokenizer.save_pretrained(args.output_dir)
-                repo.push_to_hub(
-                    commit_message=f"Training in progress epoch {epoch}", blocking=False, auto_lfs_prune=True
+            if args.with_tracking:
+                accelerator.log(
+                    {
+                        "perplexity": perplexity,
+                        "eval_loss": eval_loss,
+                        "train_loss": total_loss.item() / len(train_dataloader),
+                        "epoch": epoch,
+                        "step": completed_steps,
+                    },
+                    step=completed_steps,
                 )
 
-        if args.checkpointing_steps == "epoch":
-            output_dir = f"epoch_{epoch}"
-            if args.output_dir is not None:
-                output_dir = os.path.join(args.output_dir, output_dir)
-            accelerator.save_state(output_dir)
+            if args.push_to_hub and epoch < args.num_train_epochs - 1:
+                accelerator.wait_for_everyone()
+                unwrapped_model = accelerator.unwrap_model(model)
+                unwrapped_model.save_pretrained(
+                    args.output_dir, is_main_process=accelerator.is_main_process, save_function=accelerator.save
+                )
+                if accelerator.is_main_process:
+                    tokenizer.save_pretrained(args.output_dir)
+                    repo.push_to_hub(
+                        commit_message=f"Training in progress epoch {epoch}", blocking=False, auto_lfs_prune=True
+                    )
+
+            if args.checkpointing_steps == "epoch":
+                output_dir = f"epoch_{epoch}"
+                if args.output_dir is not None:
+                    output_dir = os.path.join(args.output_dir, output_dir)
+                accelerator.save_state(output_dir)
 
     if args.with_tracking:
         accelerator.end_training()
