@@ -57,6 +57,7 @@ from transformers import (
 from transformers.utils import check_min_version, get_full_repo_name, send_example_telemetry
 from transformers.utils.versions import require_version
 from transformers.utils.profiler import ProfilerConfig, ProfilerWrapper
+from transformers.trainer_pt_utils import distributed_concat
 # for xpu
 import intel_extension_for_pytorch as ipex
 import oneccl_bindings_for_pytorch
@@ -139,7 +140,7 @@ def parse_args():
         help="Initial learning rate (after the potential warmup period) to use.",
     )
     parser.add_argument("--weight_decay", type=float, default=0.0, help="Weight decay to use.")
-    parser.add_argument("--num_train_epochs", type=int, default=3, help="Total number of training epochs to perform.")
+    parser.add_argument("--num_train_epochs", type=int, default=1, help="Total number of training epochs to perform.")
     parser.add_argument(
         "--max_train_steps",
         type=int,
@@ -232,6 +233,12 @@ def parse_args():
             "It is an option to create the model as an empty shell, then only materialize its parameters when the pretrained weights are loaded."
             "If passed, LLM loading time and RAM consumption will be benefited."
         ),
+    )
+    parser.add_argument(
+        "--profile_step",
+        type=int,
+        default=None,
+        help="Train model with profiling steps."
     )
     args = parser.parse_args()
 
@@ -625,7 +632,8 @@ def main():
     # update the progress_bar if load from checkpoint
     progress_bar.update(completed_steps)
 
-    with ProfilerWrapper("xpu", ProfilerConfig()) as profiler:
+    profiler_config = ProfilerConfig(active=args.profile_step) if args.profile_step is not None else None
+    with ProfilerWrapper("xpu", profiler_config) as profiler:
         for epoch in range(starting_epoch, args.num_train_epochs):
             model.train()
             if args.with_tracking:
@@ -652,6 +660,8 @@ def main():
                 #if accelerator.sync_gradients:
                 #    progress_bar.update(1)
                 #    completed_steps += 1
+                progress_bar.update(1)
+                completed_steps += 1
 
                 if isinstance(checkpointing_steps, int):
                     if completed_steps % checkpointing_steps == 0:
@@ -661,7 +671,7 @@ def main():
                         accelerator.save_state(output_dir)
                 if completed_steps >= args.max_train_steps:
                     break
-                if step > 8:
+                if args.profile_step is not None and step > args.profile_step:
                     exit()
 
             model.eval()
@@ -671,11 +681,11 @@ def main():
                     outputs = model(**batch)
 
                 loss = outputs.loss
-                losses.append(accelerator.gather_for_metrics(loss.repeat(args.per_device_eval_batch_size)))
+                # losses.append(accelerator.gather_for_metrics(loss.repeat(args.per_device_eval_batch_size)))
+                losses.extend(distributed_concat(loss))
 
-            losses = torch.cat(losses)
             try:
-                eval_loss = torch.mean(losses)
+                eval_loss = torch.mean(torch.Tensor(losses))
                 perplexity = math.exp(eval_loss)
             except OverflowError:
                 perplexity = float("inf")
@@ -715,7 +725,9 @@ def main():
     if args.with_tracking:
         accelerator.end_training()
 
-    if args.output_dir is not None:
+    # skip save
+    # if args.output_dir is not None:
+    if False:
         accelerator.wait_for_everyone()
         unwrapped_model = accelerator.unwrap_model(model)
         unwrapped_model.save_pretrained(

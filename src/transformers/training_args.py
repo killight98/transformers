@@ -1158,6 +1158,13 @@ class TrainingArguments:
         },
     )
 
+    profile_step: Optional[int] = field(
+        default=None,
+        metadata={
+            "help": "Train model with profiling steps."
+        },
+    )
+
     def __post_init__(self):
         # expand paths, if not os.makedirs("~/bar") will make directory
         # in the current directory instead of the actual home

@@ -1873,7 +1873,8 @@ class Trainer:
 
         total_batched_samples = 0
 
-        with ProfilerWrapper("cuda", ProfilerConfig()) as profiler:
+        profiler_config = ProfilerConfig(active=self.args.profile_step) if self.args.profile_step is not None else None
+        with ProfilerWrapper("cuda", profiler_config) as profiler:
             for epoch in range(epochs_trained, num_train_epochs):
                 if isinstance(train_dataloader, DataLoader) and isinstance(train_dataloader.sampler, DistributedSampler):
                     train_dataloader.sampler.set_epoch(epoch)
@@ -2022,7 +2023,7 @@ class Trainer:
                         self._maybe_log_save_evaluate(tr_loss, model, trial, epoch, ignore_keys_for_eval)
                     else:
                         self.control = self.callback_handler.on_substep_end(args, self.state, self.control)
-                    if step > 8:
+                    if self.args.profile_step is not None and step > self.args.profile_step:
                         # stop training for collection
                         exit()
                     if self.control.should_epoch_stop or self.control.should_training_stop:
