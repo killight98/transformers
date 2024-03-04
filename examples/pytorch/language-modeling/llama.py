@@ -9,6 +9,7 @@ import torch
 from datasets import load_dataset
 from torch.utils.data import DataLoader
 from transformers.trainer_pt_utils import distributed_concat
+from transformers.utils.profiler import ProfilerConfig, ProfilerWrapper
 from torch import nn
 from tqdm import tqdm
 from transformers import (
@@ -80,55 +81,6 @@ def parse_args():
         )
     return parser.parse_args()
 
-@dataclass
-class ProfilerConfig:
-    wait: int = 0
-    warmup: int = 0
-    active: int = 8
-    repeat: int = 1
-    skip_first: int = 0
-
-    def get_schedule(self):
-        return torch.profiler.schedule(wait=self.wait, warmup=self.warmup, active=self.active, repeat=self.repeat,
-                                       skip_first=self.skip_first)
-
-
-class ProfilerWrapper:
-
-    def __init__(self, device: str, config: Optional[ProfilerConfig]):
-        self._config = config
-        self._use_cuda = False
-        _activities = [torch.profiler.ProfilerActivity.CPU]
-        _extra_args = {}
-        if "cuda" in device:
-            _activities.append(torch.profiler.ProfilerActivity.CUDA)
-            _extra_args['profile_memory'] = True
-            self._use_cuda = True
-        elif "xpu" in device:
-            _activities.append(torch.profiler.ProfilerActivity.XPU)
-        self._profiler = torch.profiler.profile(activities=_activities,
-                                                schedule=self._config.get_schedule(),
-                                                with_stack=True,
-                                                on_trace_ready=self._trace_handler, **_extra_args) if config else None
-
-    def __enter__(self):
-        if self._profiler:
-            self._profiler.__enter__()
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        if self._profiler:
-            self._profiler.__exit__(exc_type, exc_val, exc_tb)
-
-    def _trace_handler(self, prof):
-        file_path = f"./torchshim_{os.uname()[1]}_{os.getpid()}_{prof.step_num}.json"
-        prof.export_chrome_trace(file_path)
-
-    def step(self):
-        if self._profiler:
-            self._profiler.step()
-
-
 class Llama:
     def __init__(self, args):
         """Llama init to set config parameters"""
@@ -161,8 +113,7 @@ class Llama:
         text_column = 'text'
         target_column = 'output'
         batch_size = self.batch_size
-        train_split = 5
-        test_split = 2
+        train_split = 90
 
         # tokenizer
         tokenizer = AutoTokenizer.from_pretrained(
@@ -192,7 +143,7 @@ class Llama:
             load_from_cache_file=True,
             desc="Running tokenizer on dataset",
         )
-        raw_eval_dataset = load_dataset(dataset_name, split=f'train[{100 - test_split}%:]')
+        raw_eval_dataset = load_dataset(dataset_name, split=f'train[{train_split}%:]')
         eval_dataset = raw_eval_dataset.map(
             preprocess_function,
             batched=True,
@@ -233,6 +184,7 @@ class Llama:
         )
         model = AutoModelForCausalLM.from_pretrained(
             self.model_name_or_path,
+            torch_dtype="auto",
         )
 
         model = get_peft_model(model, peft_config)
