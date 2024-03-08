@@ -12,6 +12,13 @@ from transformers import CLIPTextModel
 from transformers import AutoTokenizer
 from tqdm import tqdm
 
+IPEX_AVAILABLE = True
+try:
+    import intel_extension_for_pytorch as ipex
+    import oneccl_bindings_for_pytorch
+except:
+    IPEX_AVAILABLE = False
+
 
 def pre_batch(batch, device):
     for k, v in batch.items():
@@ -29,13 +36,13 @@ class UNetTrainer:
 
     def __init__(self, args):
         self._config = args
+        self._device = args.device
         self._vae = self._load_vae(args)
         self._noise_scheduler = DDPMScheduler.from_pretrained(args.pretrained_model_name_or_path, subfolder="scheduler")
         self._text_encoder = CLIPTextModel.from_pretrained(args.pretrained_model_name_or_path, subfolder="text_encoder")
         self._text_tokenizer = AutoTokenizer.from_pretrained(args.pretrained_model_name_or_path, subfolder="tokenizer", use_fast=False)
         self._unet = UNetTrainer._build_unet()
         self._train_dataloader = self._init_train_dataloader(args)
-        self._device = "cuda"
 
     @staticmethod
     def _build_unet():
@@ -108,6 +115,11 @@ class UNetTrainer:
         self._unet.to(self._device)
         self._unet.train()
 
+        if "xpu" in self._device:
+            self._vae = ipex.optimize(self._vae, inplace=True)
+            self._text_encoder = ipex.optimize(self._text_encoder, inplace=True)
+            self._unet, optimizer = ipex.optimize(self._unet, optimizer=optimizer, inplace=True)
+
         global_step = 0
 
         for epoch in range(self._config.num_train_epochs):
@@ -166,13 +178,19 @@ def parse_args():
         help="Path to pretrained model or model identifier from huggingface.co/models.",
     )
     parser.add_argument(
+        "--device",
+        type=str,
+        default="cuda",
+        help="Used devices (cuda/xpu)",
+    )
+    parser.add_argument(
         "--vae_model_name_or_path",
         type=str,
         default=None,
         help="Path to pretrained vae model",
     )
     parser.add_argument(
-        "--train_batch_size", type=int, default=2, help="Batch size (per device) for the training dataloader."
+        "--train_batch_size", type=int, default=4, help="Batch size (per device) for the training dataloader."
     )
     parser.add_argument(
         "--num_train_epochs", type=int, default=1, help="Epochs number for the training dataloader."
@@ -202,5 +220,8 @@ def parse_args():
 if __name__ == "__main__":
     args = parse_args()
     set_seed(args.seed)
+    if "xpu" in args.device and not IPEX_AVAILABLE:
+        print("The ipex/torch-ccl is not available when using xpu!")
+        exit()
     unet_trainer = UNetTrainer(args)
     unet_trainer.train_loop()
