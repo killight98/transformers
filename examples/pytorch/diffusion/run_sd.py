@@ -8,8 +8,8 @@ from torchvision import transforms
 from diffusers import UNet2DConditionModel, DDPMScheduler
 from diffusers.models import AutoencoderKL
 from diffusers.optimization import get_cosine_schedule_with_warmup
-from transformers import CLIPTextModel
-from transformers import AutoTokenizer
+from transformers import CLIPTextModel, AutoTokenizer
+from transformers.utils.profiler import ProfilerConfig, ProfilerWrapper
 from tqdm import tqdm
 
 IPEX_AVAILABLE = True
@@ -122,51 +122,58 @@ class UNetTrainer:
 
         global_step = 0
 
-        for epoch in range(self._config.num_train_epochs):
-            progress_bar = tqdm(total=len(self._train_dataloader), disable=False)
-            progress_bar.set_description(f"Epoch {epoch}")
+        profiler_config = ProfilerConfig(active=self._config.profile_step) if self._config.profile_step is not None else None
+        with ProfilerWrapper(self._device, profiler_config) as profiler:
+            for epoch in range(self._config.num_train_epochs):
+                progress_bar = tqdm(total=len(self._train_dataloader), disable=False)
+                progress_bar.set_description(f"Epoch {epoch}")
 
-            for step, batch in enumerate(self._train_dataloader):
-                text_input_ids = self._text_tokenizer(batch["name"], truncation=True,
-                    padding="max_length", max_length=self._text_tokenizer.model_max_length, return_tensors="pt",).input_ids
-                pre_batch(batch, self._device)
+                for step, batch in enumerate(self._train_dataloader):
+                    text_input_ids = self._text_tokenizer(batch["name"], truncation=True,
+                        padding="max_length", max_length=self._text_tokenizer.model_max_length, return_tensors="pt",).input_ids
+                    pre_batch(batch, self._device)
 
-                # Convert images to latent space
-                latents = self._vae.encode(batch["images"]).latent_dist.sample()
-                latents = latents * self._vae.config.scaling_factor
+                    # Convert images to latent space
+                    latents = self._vae.encode(batch["images"]).latent_dist.sample()
+                    latents = latents * self._vae.config.scaling_factor
 
-                # Sample noise to add to the latents
-                noise = torch.randn_like(latents)
-                bsz = latents.shape[0]
+                    # Sample noise to add to the latents
+                    noise = torch.randn_like(latents)
+                    bsz = latents.shape[0]
 
-                # Sample a random timestep for each latents
-                timesteps = torch.randint(
-                    0, self._noise_scheduler.config.num_train_timesteps, (bsz,), device=latents.device,
-                    dtype=torch.int64
-                )
-                timesteps = timesteps.long()
+                    # Sample a random timestep for each latents
+                    timesteps = torch.randint(
+                        0, self._noise_scheduler.config.num_train_timesteps, (bsz,), device=latents.device,
+                        dtype=torch.int64
+                    )
+                    timesteps = timesteps.long()
 
-                # Add noise to latents (this is the forward diffusion process)
-                noisy_latents = self._noise_scheduler.add_noise(latents, noise, timesteps)
+                    # Add noise to latents (this is the forward diffusion process)
+                    noisy_latents = self._noise_scheduler.add_noise(latents, noise, timesteps)
 
-                # conditioning
-                encoder_hidden_states = self._text_encoder(text_input_ids.to(self._device))[0]
+                    # conditioning
+                    encoder_hidden_states = self._text_encoder(text_input_ids.to(self._device))[0]
 
-                # Predict the noise residual
-                noise_pred = self._unet(noisy_latents, timesteps, encoder_hidden_states, return_dict=False)[0]
-                loss = F.mse_loss(noise_pred, noise)
-                loss.backward()
+                    # Predict the noise residual
+                    noise_pred = self._unet(noisy_latents, timesteps, encoder_hidden_states, return_dict=False)[0]
+                    loss = F.mse_loss(noise_pred, noise)
+                    loss.backward()
 
-                torch.nn.utils.clip_grad_norm_(self._unet.parameters(), 1.0)
+                    torch.nn.utils.clip_grad_norm_(self._unet.parameters(), 1.0)
 
-                optimizer.step()
-                lr_scheduler.step()
-                optimizer.zero_grad()
+                    optimizer.step()
+                    lr_scheduler.step()
+                    optimizer.zero_grad()
+                    profiler.step()
 
-                progress_bar.update(1)
-                logs = {"loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0], "step": global_step}
-                progress_bar.set_postfix(**logs)
-                global_step += 1
+                    progress_bar.update(1)
+                    logs = {"loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0], "step": global_step}
+                    progress_bar.set_postfix(**logs)
+                    global_step += 1
+
+                    if self._config.profile_step is not None and global_step > self._config.profile_step:
+                        # stop training
+                        exit()
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Stable Diffusion training script.")
@@ -213,6 +220,12 @@ def parse_args():
             "The resolution for input images, all the images in the train/validation dataset will be resized to this"
             " resolution"
         ),
+    )
+    parser.add_argument(
+        "--profile_step",
+        type=int,
+        default=None,
+        help="Train model with profiling steps."
     )
     return parser.parse_args()
 
