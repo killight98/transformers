@@ -2,8 +2,10 @@ import argparse
 from datasets import load_dataset
 import random
 import numpy as np
+import os
 import torch
 import torch.nn.functional as F
+from torch.nn.parallel import DistributedDataParallel
 from torchvision import transforms
 from diffusers import UNet2DConditionModel, DDPMScheduler
 from diffusers.models import AutoencoderKL
@@ -43,6 +45,11 @@ class UNetTrainer:
         self._text_tokenizer = AutoTokenizer.from_pretrained(args.pretrained_model_name_or_path, subfolder="tokenizer", use_fast=False)
         self._unet = UNetTrainer._build_unet()
         self._train_dataloader = self._init_train_dataloader(args)
+        self._use_ddp = False
+        self._rank = 0
+        self._local_rank = 0
+        self._world_size = 0
+        self._setup_device()
 
     @staticmethod
     def _build_unet():
@@ -69,6 +76,37 @@ class UNetTrainer:
             ),
             use_linear_projection=True,
         )
+
+    def _setup_device(self):
+        if self._device == 'cuda':
+            device_count = torch.cuda.device_count()
+            assert device_count >= 1, "Cannot find cuda"
+            if "LOCAL_RANK" in os.environ:
+                self._local_rank = int(os.environ["LOCAL_RANK"])
+                self._rank = int(os.environ['RANK'])
+                self._world_size = int(os.environ['WORLD_SIZE'])
+                assert self._local_rank < device_count, f"Not enough devices for local rank {self._local_rank}"
+                if not torch.distributed.is_initialized():
+                    torch.distributed.init_process_group(backend="nccl")
+                torch.cuda.set_device(self._local_rank)
+                self._device = f"cuda:{self._local_rank}"
+                self._use_ddp = True
+        elif self._device == 'xpu':
+            device_count = torch.xpu.device_count()
+            assert device_count >= 1, "Cannot find xpu"
+            if "PMI_SIZE" in os.environ:
+                self._rank = int(os.environ["PMI_RANK"])
+                self._world_size = int(os.environ["PMI_SIZE"])
+                assert self._rank < device_count, f"Not enough devices for local rank {self._rank}"
+                self._local_rank = self._rank
+                self._device = f"xpu:{self._rank}"
+                # re-config env
+                os.environ['RANK'] = str(self._rank)
+                os.environ['WORLD_SIZE'] = str(self._world_size)
+                os.environ['MASTER_ADDR'] = '127.0.0.1'
+                os.environ['MASTER_PORT'] = '29500'
+                torch.distributed.init_process_group(backend="ccl")
+                self._use_ddp = True
 
     def _load_vae(self, args):
         if args.vae_model_name_or_path is not None:
@@ -120,12 +158,19 @@ class UNetTrainer:
             self._text_encoder = ipex.optimize(self._text_encoder, inplace=True)
             self._unet, optimizer = ipex.optimize(self._unet, optimizer=optimizer, inplace=True)
 
+        if self._use_ddp and torch.distributed.get_world_size() > 1:
+            self._unet = DistributedDataParallel(
+                self._unet,
+                device_ids=[self._local_rank],
+                output_device=self._local_rank,
+            )
+
         global_step = 0
 
         profiler_config = ProfilerConfig(active=self._config.profile_step) if self._config.profile_step is not None else None
         with ProfilerWrapper(self._device, profiler_config) as profiler:
             for epoch in range(self._config.num_train_epochs):
-                progress_bar = tqdm(total=len(self._train_dataloader), disable=False)
+                progress_bar = tqdm(total=len(self._train_dataloader), disable=self._local_rank > 0)
                 progress_bar.set_description(f"Epoch {epoch}")
 
                 for step, batch in enumerate(self._train_dataloader):
@@ -197,7 +242,7 @@ def parse_args():
         help="Path to pretrained vae model",
     )
     parser.add_argument(
-        "--train_batch_size", type=int, default=4, help="Batch size (per device) for the training dataloader."
+        "--train_batch_size", type=int, default=8, help="Batch size (per device) for the training dataloader."
     )
     parser.add_argument(
         "--num_train_epochs", type=int, default=1, help="Epochs number for the training dataloader."
