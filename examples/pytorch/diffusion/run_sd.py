@@ -6,6 +6,8 @@ import os
 import torch
 import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel
+from torch.utils.data.distributed import DistributedSampler
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torchvision import transforms
 from diffusers import UNet2DConditionModel, DDPMScheduler
 from diffusers.models import AutoencoderKL
@@ -44,12 +46,13 @@ class UNetTrainer:
         self._text_encoder = CLIPTextModel.from_pretrained(args.pretrained_model_name_or_path, subfolder="text_encoder")
         self._text_tokenizer = AutoTokenizer.from_pretrained(args.pretrained_model_name_or_path, subfolder="tokenizer", use_fast=False)
         self._unet = UNetTrainer._build_unet()
-        self._train_dataloader = self._init_train_dataloader(args)
         self._use_ddp = False
         self._rank = 0
         self._local_rank = 0
         self._world_size = 0
         self._setup_device()
+        self._use_fsdp = self._use_ddp and args.fsdp
+        self._train_dataloader = self._init_train_dataloader(args)
 
     @staticmethod
     def _build_unet():
@@ -135,7 +138,12 @@ class UNetTrainer:
         dataset.set_transform(transform)
 
         train_batch_size = args.train_batch_size
-        return torch.utils.data.DataLoader(dataset, batch_size=train_batch_size, shuffle=True)
+        extra_args = {"shuffle": True}
+        if self._use_fsdp:
+            extra_args["sampler"] = DistributedSampler(dataset, rank=self._rank, num_replicas=self._world_size, shuffle=True)
+            extra_args["shuffle"] = False
+            extra_args["pin_memory"] = True
+        return torch.utils.data.DataLoader(dataset, batch_size=train_batch_size, **extra_args)
 
 
     def train_loop(self):
@@ -158,7 +166,9 @@ class UNetTrainer:
             self._text_encoder = ipex.optimize(self._text_encoder, inplace=True)
             self._unet, optimizer = ipex.optimize(self._unet, optimizer=optimizer, inplace=True)
 
-        if self._use_ddp and torch.distributed.get_world_size() > 1:
+        if self._use_fsdp:
+            self._unet = FSDP(self._unet)
+        elif self._use_ddp and torch.distributed.get_world_size() > 1:
             self._unet = DistributedDataParallel(
                 self._unet,
                 device_ids=[self._local_rank],
@@ -257,6 +267,7 @@ def parse_args():
         "--lr_warmup_steps", type=int, default=500, help="Number of steps for the warmup in the lr scheduler."
     )
     parser.add_argument("--seed", type=int, default=42, help="A seed for reproducible training.")
+    parser.add_argument("--fsdp", action='store_true', help="Enable FSDP")
     parser.add_argument(
         "--resolution",
         type=int,
