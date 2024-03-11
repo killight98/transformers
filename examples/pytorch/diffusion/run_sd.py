@@ -118,10 +118,7 @@ class UNetTrainer:
 
     def _init_train_dataloader(self, args):
         image_size = args.resolution
-        # TODO: change to LAION-400M-filtered
-        # dataset_name = "/home/luoxiaoc/Projects/customize_sd/smithsonian_butterflies_subset"
-        dataset_name = "huggan/smithsonian_butterflies_subset"
-        dataset = load_dataset(dataset_name, split="train")
+        dataset = load_dataset(args.dataset, split="train")
         preprocess = transforms.Compose(
             [
                 transforms.Resize((image_size, image_size)),
@@ -238,6 +235,12 @@ def parse_args():
         default=None,
         required=True,
         help="Path to pretrained model or model identifier from huggingface.co/models.",
+    )
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        default="huggan/smithsonian_butterflies_subset",
+        help="The name or path of the dataset.",
     )
     parser.add_argument(
         "--device",
