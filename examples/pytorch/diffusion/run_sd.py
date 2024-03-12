@@ -136,8 +136,8 @@ class UNetTrainer:
 
         train_batch_size = args.train_batch_size
         extra_args = {"shuffle": True}
-        if self._use_fsdp:
-            extra_args["sampler"] = DistributedSampler(dataset, rank=self._rank, num_replicas=self._world_size, shuffle=True)
+        if self._use_fsdp or self._use_ddp:
+            extra_args["sampler"] = DistributedSampler(dataset, rank=self._rank, num_replicas=self._world_size, shuffle=True, seed=self._config.seed)
             extra_args["shuffle"] = False
             extra_args["pin_memory"] = True
         return torch.utils.data.DataLoader(dataset, batch_size=train_batch_size, **extra_args)
