@@ -8,6 +8,7 @@ import math
 import torch
 from datasets import load_dataset
 from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
 from transformers.trainer_pt_utils import distributed_concat
 from transformers.utils.profiler import ProfilerConfig, ProfilerWrapper
 from torch import nn
@@ -100,7 +101,7 @@ class Llama:
         if device == 'xpu' and not XPU_SUPPORT:
             raise ValueError("xpu device is not support by the python library")
         self.device = device
-        self.use_dpp, self.rank, self.local_rank, self.world_size = self._setup_device()
+        self.use_ddp, self.rank, self.local_rank, self.world_size = self._setup_device()
         self._device = f'{device}:{self.rank}'
         logger.info(self._device)
         seed = 42
@@ -156,12 +157,15 @@ class Llama:
             logger.info(f"train: {train_dataset}, {train_dataset.shape} \n")
             logger.info(f"eval: {eval_dataset}, {eval_dataset.shape} \n")
 
+        extra_args = {}
+        if self.use_ddp:
+            extra_args["sampler"] = DistributedSampler(train_dataset, rank=self.rank, num_replicas=self.world_size, shuffle=True)
         train_dataloader = DataLoader(
             train_dataset,
-            shuffle=True,
             collate_fn=default_data_collator,
             batch_size=batch_size,
-            pin_memory=True
+            pin_memory=True,
+            **extra_args
         )
         eval_dataloader = DataLoader(
             eval_dataset,
@@ -211,7 +215,7 @@ class Llama:
         if self.device == 'xpu':
             self.model, optimizer = ipex.optimize(self.model, optimizer=optimizer, inplace=True)
 
-        if self.use_dpp and torch.distributed.get_world_size() > 1:
+        if self.use_ddp and torch.distributed.get_world_size() > 1:
             self.model = nn.parallel.DistributedDataParallel(
                 self.model,
                 device_ids=[self.local_rank],
