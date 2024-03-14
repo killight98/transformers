@@ -7,8 +7,10 @@ import torch
 import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data.distributed import DistributedSampler
+from torch.utils.data import Dataset
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torchvision import transforms
+from torchvision.datasets import ImageFolder
 from diffusers import UNet2DConditionModel, DDPMScheduler
 from diffusers.models import AutoencoderKL
 from diffusers.optimization import get_cosine_schedule_with_warmup
@@ -23,6 +25,56 @@ try:
 except:
     IPEX_AVAILABLE = False
 
+class SDDataset(Dataset):
+    def __init__(self, data_folder):
+        self._check_text_image_filename(data_folder)
+        self._images = ImageFolder(data_folder)
+        self._texts = self._read_text_files_in_folder(data_folder)
+
+    def transform(self, preprocess):
+        self._images = [preprocess(image.convert('RGB')) for image, _ in self._images]
+
+    def _check_text_image_filename(self, folder):
+        self._text_files = []
+        self._image_files = []
+        for file_name in os.listdir(folder):
+            if file_name.endswith('.txt'):
+                self._text_files.append(file_name)
+
+        image_folder = os.path.join(folder, 'jpg')
+        for file_name in os.listdir(image_folder):
+            if file_name.endswith('.jpg'):
+                self._image_files.append(file_name)
+
+        self._text_files.sort()
+        self._image_files.sort()
+        for t, i in zip(self._text_files, self._image_files):
+            spliter = os.path.splitext
+            if spliter(t)[0] != spliter(i)[0]:
+                print(f'text and image file not match {t} {i}')
+                exit()
+
+    def _read_text_files_in_folder(self, folder):
+        texts = []
+        for file_name in self._text_files:
+            file_path = os.path.join(folder, file_name)
+            with open(file_path, 'r') as file:
+                texts.append(file.read())
+        return texts
+
+    def show_samples(self, idx):
+        '''This can be check before transformed'''
+        print(f"name: {self._texts[idx]}")
+        self._images[idx][0].show()
+
+    def __len__(self):
+        return len(self._texts)
+
+    def __getitem__(self, idx):
+        if torch.is_tensor(idx):
+            idx = idx.tolist()
+
+        return {'images': self._images[idx], 'name': self._texts[idx]}
 
 def pre_batch(batch, device):
     for k, v in batch.items():
@@ -118,7 +170,13 @@ class UNetTrainer:
 
     def _init_train_dataloader(self, args):
         image_size = args.resolution
-        dataset = load_dataset(args.dataset, split="train")
+        hf_dataset = False
+        try:
+            dataset = SDDataset(data_folder=args.dataset)
+        except:
+            hf_dataset = True
+            dataset = load_dataset(args.dataset, split="train")
+
         preprocess = transforms.Compose(
             [
                 transforms.Resize((image_size, image_size)),
@@ -132,7 +190,10 @@ class UNetTrainer:
             images = [preprocess(image.convert("RGB")) for image in examples["image"]]
             return {"images": images, "name": examples["name"]}
 
-        dataset.set_transform(transform)
+        if hf_dataset:
+            dataset.set_transform(transform)
+        else:
+            dataset.transform(preprocess)
 
         train_batch_size = args.train_batch_size
         extra_args = {"shuffle": True}
