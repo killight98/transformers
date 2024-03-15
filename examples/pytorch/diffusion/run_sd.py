@@ -10,7 +10,7 @@ from torch.utils.data.distributed import DistributedSampler
 from torch.utils.data import Dataset
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from torchvision import transforms
-from torchvision.datasets import ImageFolder
+from PIL import Image
 from diffusers import UNet2DConditionModel, DDPMScheduler
 from diffusers.models import AutoencoderKL
 from diffusers.optimization import get_cosine_schedule_with_warmup
@@ -28,11 +28,11 @@ except:
 class SDDataset(Dataset):
     def __init__(self, data_folder):
         self._check_text_image_filename(data_folder)
-        self._images = ImageFolder(data_folder)
+        self._images = self._read_image_files_in_folder(data_folder)
         self._texts = self._read_text_files_in_folder(data_folder)
 
     def transform(self, preprocess):
-        self._images = [preprocess(image.convert('RGB')) for image, _ in self._images]
+        self._images = [preprocess(image.convert('RGB')) for image in self._images]
 
     def _check_text_image_filename(self, folder):
         self._text_files = []
@@ -40,10 +40,7 @@ class SDDataset(Dataset):
         for file_name in os.listdir(folder):
             if file_name.endswith('.txt'):
                 self._text_files.append(file_name)
-
-        image_folder = os.path.join(folder, 'jpg')
-        for file_name in os.listdir(image_folder):
-            if file_name.endswith('.jpg'):
+            elif file_name.endswith('.jpg'):
                 self._image_files.append(file_name)
 
         self._text_files.sort()
@@ -61,6 +58,15 @@ class SDDataset(Dataset):
             with open(file_path, 'r') as file:
                 texts.append(file.read())
         return texts
+
+    def _read_image_files_in_folder(self, folder):
+        images = []
+        for file_name in self._image_files:
+            file_path = os.path.join(folder, file_name)
+            with open(file_path, "rb") as f:
+                img = Image.open(f).convert("RGB")
+                images.append(img)
+        return images
 
     def show_samples(self, idx):
         '''This can be check before transformed'''
@@ -170,12 +176,17 @@ class UNetTrainer:
 
     def _init_train_dataloader(self, args):
         image_size = args.resolution
-        hf_dataset = False
-        try:
-            dataset = SDDataset(data_folder=args.dataset)
-        except:
-            hf_dataset = True
-            dataset = load_dataset(args.dataset, split="train")
+        def _check_text_image_filename(dataset_path):
+            txt, img = False, False
+            if os.path.exists(dataset_path):
+                for file in os.listdir(dataset_path):
+                    txt = True if file.endswith('.txt') else txt
+                    img = True if file.endswith('.jpg') else img
+                    if txt and img:
+                        return True
+            return False
+
+        hf_dataset = not _check_text_image_filename(args.dataset)
 
         preprocess = transforms.Compose(
             [
@@ -191,8 +202,10 @@ class UNetTrainer:
             return {"images": images, "name": examples["name"]}
 
         if hf_dataset:
+            dataset = load_dataset(args.dataset, split="train")
             dataset.set_transform(transform)
         else:
+            dataset = SDDataset(data_folder=args.dataset)
             dataset.transform(preprocess)
 
         train_batch_size = args.train_batch_size
