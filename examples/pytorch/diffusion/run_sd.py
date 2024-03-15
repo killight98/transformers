@@ -238,7 +238,7 @@ class UNetTrainer:
             self._unet, optimizer = ipex.optimize(self._unet, optimizer=optimizer, inplace=True)
 
         if self._use_fsdp:
-            self._unet = FSDP(self._unet)
+            self._unet = FSDP(self._unet, use_orig_params=True)
         elif self._use_ddp and torch.distributed.get_world_size() > 1:
             self._unet = DistributedDataParallel(
                 self._unet,
@@ -285,7 +285,10 @@ class UNetTrainer:
                     loss = F.mse_loss(noise_pred, noise)
                     loss.backward()
 
-                    torch.nn.utils.clip_grad_norm_(self._unet.parameters(), 1.0)
+                    if self._use_fsdp:
+                        self._unet.clip_grad_norm_(1.0)
+                    else:
+                        torch.nn.utils.clip_grad_norm_(self._unet.parameters(), 1.0)
 
                     optimizer.step()
                     lr_scheduler.step()
@@ -348,7 +351,7 @@ def parse_args():
     parser.add_argument(
         "--resolution",
         type=int,
-        default=512,
+        default=256,
         help=(
             "The resolution for input images, all the images in the train/validation dataset will be resized to this"
             " resolution"
