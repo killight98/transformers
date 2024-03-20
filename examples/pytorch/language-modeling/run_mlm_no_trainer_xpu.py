@@ -38,6 +38,8 @@ from datasets import load_dataset
 from huggingface_hub import Repository, create_repo
 from torch.utils.data import DataLoader
 from torch import nn
+from torch.utils.data.distributed import DistributedSampler
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from tqdm.auto import tqdm
 from typing import Tuple
 
@@ -55,7 +57,7 @@ from transformers import (
 from transformers.utils import check_min_version, get_full_repo_name, send_example_telemetry
 from transformers.utils.versions import require_version
 from transformers.utils.profiler import ProfilerConfig, ProfilerWrapper
-from transformers.trainer_pt_utils import distributed_concat
+from transformers.trainer_pt_utils import distributed_concat, ShardSampler
 # For xpu
 import intel_extension_for_pytorch as ipex
 import oneccl_bindings_for_pytorch
@@ -246,6 +248,7 @@ def parse_args():
         default=None,
         help="Train model with profiling steps."
     )
+    parser.add_argument("--fsdp", action='store_true', help="Enable FSDP")
     args = parser.parse_args()
 
     # Sanity checks
@@ -511,11 +514,21 @@ def main():
     # This one will take care of randomly masking the tokens.
     data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm_probability=args.mlm_probability)
 
+    extra_args = {"shuffle": True}
+    if use_ddp:
+        extra_args["sampler"] = DistributedSampler(train_dataset, rank=local_rank, num_replicas=world_size, shuffle=True)
+        extra_args["shuffle"] = False
+        extra_args["pin_memory"] = True
     # DataLoaders creation:
     train_dataloader = DataLoader(
-        train_dataset, shuffle=True, collate_fn=data_collator, batch_size=args.per_device_train_batch_size
+        train_dataset, collate_fn=data_collator, batch_size=args.per_device_train_batch_size, **extra_args
     )
-    eval_dataloader = DataLoader(eval_dataset, collate_fn=data_collator, batch_size=args.per_device_eval_batch_size)
+    eval_extra_args = {}
+    if use_ddp:
+        eval_extra_args["sampler"] = ShardSampler(eval_dataset, batch_size=args.per_device_eval_batch_size,
+                                                  process_index=local_rank, num_processes=world_size)
+        eval_extra_args["pin_memory"] = True
+    eval_dataloader = DataLoader(eval_dataset, collate_fn=data_collator, batch_size=args.per_device_eval_batch_size, **eval_extra_args)
 
     # Optimizer
     # Split weights in two groups, one with weight decay and the other not.
@@ -553,13 +566,16 @@ def main():
     model.train()
     model, optimizer = ipex.optimize(model, optimizer=optimizer, inplace=True)
     if use_ddp and torch.distributed.get_world_size() > 1:
-        model = nn.parallel.DistributedDataParallel(
-            model,
-            device_ids=[local_rank],
-            output_device=local_rank,
-            broadcast_buffers=False,
-            # find_unused_parameters=True
-        )
+        if args.fsdp:
+            model = FSDP(model, use_orig_params=True)
+        else:
+            model = nn.parallel.DistributedDataParallel(
+                model,
+                device_ids=[local_rank],
+                output_device=local_rank,
+                broadcast_buffers=False,
+                # find_unused_parameters=True
+            )
 
     # We need to recalculate our total training steps as the size of the training dataloader may have changed.
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
@@ -584,13 +600,14 @@ def main():
     # Train!
     total_batch_size = args.per_device_train_batch_size * world_size * args.gradient_accumulation_steps
 
-    logger.info("***** Running training *****")
-    logger.info(f"  Num examples = {len(train_dataset)}")
-    logger.info(f"  Num Epochs = {args.num_train_epochs}")
-    logger.info(f"  Instantaneous batch size per device = {args.per_device_train_batch_size}")
-    logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
-    logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
-    logger.info(f"  Total optimization steps = {args.max_train_steps}")
+    if local_rank <= 0:
+        logger.info("***** Running training *****")
+        logger.info(f"  Num examples = {len(train_dataset)}")
+        logger.info(f"  Num Epochs = {args.num_train_epochs}")
+        logger.info(f"  Instantaneous batch size per device = {args.per_device_train_batch_size}")
+        logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
+        logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
+        logger.info(f"  Total optimization steps = {args.max_train_steps}")
     # Only show the progress bar once on each machine.
     progress_bar = tqdm(range(args.max_train_steps), disable=local_rank > 0)
     completed_steps = 0
@@ -641,6 +658,12 @@ def main():
                 if args.with_tracking:
                     total_loss += loss.detach().float()
                 loss.backward()
+
+                if use_ddp and args.fsdp:
+                    model.clip_grad_norm_(1.0)
+                else:
+                    nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad()
@@ -659,7 +682,7 @@ def main():
                 if completed_steps >= args.max_train_steps:
                     break
 
-                if args.profile_step is not None and step > args.profile_step:
+                if args.profile_step is not None and step == args.profile_step - 1:
                     exit()
 
             model.eval()
@@ -672,7 +695,6 @@ def main():
                 # losses.append(accelerator.gather_for_metrics(loss.repeat(args.per_device_eval_batch_size)))
                 losses.extend(distributed_concat(loss))
 
-            losses = torch.cat(losses)
             try:
                 eval_loss = torch.mean(torch.Tensor(losses))
                 perplexity = math.exp(eval_loss)

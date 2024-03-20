@@ -696,7 +696,7 @@ def main():
                         accelerator.save_state(output_dir)
                 if completed_steps >= args.max_train_steps:
                     break
-                if args.profile_step is not None and step > args.profile_step:
+                if args.profile_step is not None and step == args.profile_step - 1:
                     exit()
 
             model.eval()
