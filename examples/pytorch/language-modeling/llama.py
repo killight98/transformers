@@ -9,6 +9,10 @@ import torch
 from datasets import load_dataset
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
+from torch.distributed.fsdp import (
+        FullyShardedDataParallel as FSDP,
+        MixedPrecision,
+        )
 from transformers.trainer_pt_utils import distributed_concat
 from transformers.utils.profiler import ProfilerConfig, ProfilerWrapper
 from torch import nn
@@ -80,6 +84,7 @@ def parse_args():
         type=int,
         default=None,
         )
+    parser.add_argument("--fsdp", action='store_true', help="Enable FSDP")
     return parser.parse_args()
 
 class Llama:
@@ -92,6 +97,7 @@ class Llama:
         self.batch_size = args.per_device_train_batch_size
         self.num_epochs = args.num_train_epoch
         self.profile_step = args.profile_step
+        self.use_fsdp = args.fsdp
 
         # device config
         device = args.device_type
@@ -215,7 +221,12 @@ class Llama:
         if self.device == 'xpu':
             self.model, optimizer = ipex.optimize(self.model, optimizer=optimizer, inplace=True)
 
-        if self.use_ddp and torch.distributed.get_world_size() > 1:
+        if self.use_fsdp:
+            fp16 = MixedPrecision(
+                    param_dtype = torch.float16,
+                    )
+            self.model = FSDP(self.model, use_orig_params=True, mixed_precision = fp16)
+        elif self.use_ddp and torch.distributed.get_world_size() > 1:
             self.model = nn.parallel.DistributedDataParallel(
                 self.model,
                 device_ids=[self.local_rank],
