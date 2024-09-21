@@ -33,8 +33,10 @@ from pathlib import Path
 
 import datasets
 import torch
+import functools
 from torch.utils.data.distributed import DistributedSampler
 from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
 #from accelerate import Accelerator, DistributedType
 #from accelerate.logging import get_logger
 #from accelerate.utils import set_seed
@@ -60,6 +62,7 @@ from transformers.utils import check_min_version, get_full_repo_name, send_examp
 from transformers.utils.versions import require_version
 from transformers.utils.profiler import ProfilerConfig, ProfilerWrapper
 from transformers.trainer_pt_utils import distributed_concat, ShardSampler
+from transformers.models.gpt2.modeling_gpt2 import GPT2Block
 # for xpu
 import intel_extension_for_pytorch as ipex
 import oneccl_bindings_for_pytorch
@@ -569,7 +572,13 @@ def main():
     model, optimizer = ipex.optimize(model, optimizer=optimizer, inplace=True)
     if use_ddp and torch.distributed.get_world_size() > 1:
         if args.fsdp:
-            model = FSDP(model, use_orig_params=True)
+            fsdp_kwargs = {
+                'use_orig_params': True,
+                'backward_prefetch': None,
+                'limit_all_gathers': False,
+                "auto_wrap_policy": functools.partial(transformer_auto_wrap_policy, transformer_layer_cls={GPT2Block})
+            }
+            model = FSDP(model, **fsdp_kwargs)
         else:
             model = nn.parallel.DistributedDataParallel(
                 model,
